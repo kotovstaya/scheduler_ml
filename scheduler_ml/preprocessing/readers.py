@@ -55,19 +55,25 @@ class Oracle2ParquetReader(BaseReader):
             .builder
             .appName("test")
             .master("spark://spark-master:7077")
+            .config("spark.jars.packages", 'org.postgresql:postgresql:42.2.10')
             .config("spark.sql.files.ignoreMissingFiles", "true")
             .config("spark.network.timeout", "10000s")
             .config("spark.sql.sources.partitionOverwriteMode", "dynamic")
-            .config("url", "jdbc:oracle:thin:dev/dev@//postgres:5432/SID")
-            .config("dbtable", "dev")
-            .config("user", "dev")
-            .config("password", "dev")
-            .config("driver", "oracle.jdbc.driver.OracleDriver")
             .getOrCreate()
         )
 
     def read(self, table_name):
-        pass
+        return (
+            self.spark
+            .read
+            .format("jdbc")
+            .option("url", "jdbc:postgresql://postgres:5432/qos")
+            .option("dbtable", table_name)
+            .option("user", "qos")
+            .option("password", "qos")
+            .option("driver", "org.postgresql.Driver")
+            .load()
+        )
 
 
 class FTP2PandasCSVReader(BaseReader):

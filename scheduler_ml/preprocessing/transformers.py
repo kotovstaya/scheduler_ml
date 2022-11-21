@@ -99,7 +99,7 @@ class HistDataTransformer(BaseHistDataTransformer):
             "shop_id": row["shop_id"],
             "dt": dtt,
             "data_type": self.data_type,
-            "info": row[set(all_columns) - set(unused_columns)].to_json(),
+            "info": row[list(set(all_columns) - set(unused_columns))].to_json(),
         }
 
     def _chunk_transform(

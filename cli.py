@@ -2,7 +2,7 @@ import logging
 import os
 
 import click
-from scheduler_ml.preprocessing import extractors
+from scheduler_ml.preprocessing import extractors, readers
 
 
 @click.group()
@@ -10,8 +10,9 @@ def messages():
   pass
 
 @click.command()
-def oracle_read():
-    readers.Oracle2ParquetReader()
+def postgres_read():
+    o2pr = readers.Oracle2ParquetReader()
+    print(o2pr.read('base_shop').show(3))
 
 
 @click.command()
@@ -84,7 +85,7 @@ def delivery_extractor(host, access_key, secret_key, system_code, data_type, buc
 
 messages.add_command(ftp_2_s3)
 messages.add_command(delivery_extractor)
-messages.add_command(oracle_read)
+messages.add_command(postgres_read)
 
 
 if __name__ == '__main__':

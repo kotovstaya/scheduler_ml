@@ -44,5 +44,5 @@ class Parquet2OracleWriter(BaseWriter):
         pass
 
 
-select * from forecast_operationtype fo limit 5;
+# select * from forecast_operationtype fo limit 5;
 
