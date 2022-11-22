@@ -40,7 +40,7 @@ class HistDataTransformer(BaseHistDataTransformer):
         self.cached_data = {}
 
     def get_shop_id_by_shop_num(self, code):
-        shop_id = np.random.randint(0, 100)
+        shop_id = np.random.randint(277, 288, size=1)[0]
         if np.random.random() > 0.5:
             shop_id = None
         # shop_id = self.cached_data['generic_shop_ids'].get(code)

@@ -2,16 +2,65 @@ import logging
 import os
 
 import click
-from scheduler_ml.preprocessing import extractors, readers
+from scheduler_ml.preprocessing import extractors, readers, writers
 
 
 @click.group()
 def messages():
   pass
 
+
+@click.command()
+@click.option('--host', type=str, )
+@click.option('--access-key', type=str, )
+@click.option('--secret-key', type=str, )
+@click.option('--bucket-name', type=str, )
+@click.option('--filename', type=str, )
+def minio_array_read(
+        host: str, 
+        access_key: str, 
+        secret_key: str, 
+        bucket_name: str,
+        filename: str):
+
+    args = {
+        "host": host,
+        "access_key": access_key,
+        "secret_key": secret_key,
+        "bucket_name": bucket_name,
+    }
+    m2ar = readers.Minio2ArrayReader(**args)
+    array = m2ar.read(filename)
+
+    args = {
+        "spark_host": "spark-master",
+        "spark_port": 7077,
+        "db_host": "postgres",
+        "db_port": 5432,
+        "db_user": "qos",
+        "db_password": "qos",
+        "db_name": "qos"
+    }
+    a2pw = writers.Array2PostgresWriter(**args)
+    a2pw.write(array, "forecast_receipt")
+
+
+# python cli.py minio-array-read --host=minio:9001 --access-key=admin --secret-key=admin123 --filename=delivery_20221114_transformed.npy --bucket-name=data-science
+
+
 @click.command()
 def postgres_read():
-    o2pr = readers.Oracle2ParquetReader()
+    args = {
+        "spark_host": "spark-master",
+        "spark_port": 7077,
+        "db_host": "postgres",
+        "db_port": 5432,
+        "db_user": "qos",
+        "db_password": "qos",
+        "db_name": "qos"
+    }
+
+    o2pr = readers.Postgres2ParquetReader(**args)
     print(o2pr.read('base_shop').show(3))
 
 
@@ -28,7 +77,6 @@ def ftp_2_s3(folder: str, filename: str, bucket: str):
 @click.option('--access-key', type=str, )
 @click.option('--secret-key', type=str, )
 @click.option('--system-code', type=str, )
-@click.option('--secret-key', type=str, )
 @click.option('--data-type', type=str, )
 @click.option('--bucket-name', type=str, )
 def delivery_extractor(host, access_key, secret_key, system_code, data_type, bucket_name):
@@ -86,6 +134,7 @@ def delivery_extractor(host, access_key, secret_key, system_code, data_type, buc
 messages.add_command(ftp_2_s3)
 messages.add_command(delivery_extractor)
 messages.add_command(postgres_read)
+messages.add_command(minio_array_read)
 
 
 if __name__ == '__main__':
