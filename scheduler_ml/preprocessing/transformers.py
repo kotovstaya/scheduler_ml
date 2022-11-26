@@ -1,20 +1,16 @@
+import copy
 import datetime as dt
 import logging
 import typing as tp
 
 import numpy as np
 import pandas as pd
+from pyspark.sql import Window
+from pyspark.sql import functions as F
+from pyspark.sql import types as T
 
 
-class BaseHistDataTransformer:
-    def __init__(self):
-        pass
-
-    def transform(self, **kwargs):
-        raise NotImplemented
-
-
-class HistDataTransformer(BaseHistDataTransformer):
+class HistDataTransformerSpark:
     def __init__(self,
                  system_code,
                  data_type,
@@ -22,157 +18,122 @@ class HistDataTransformer(BaseHistDataTransformer):
                  shop_num_column_name,
                  dt_or_dttm_column_name,
                  dt_or_dttm_format,
+                 fix_date: bool = False,
                  columns: tp.Optional[tp.List[str]] = None,
                  receipt_code_columns: tp.Optional[tp.List[str]] = None,
                  **kwargs):
         self.system_code = system_code
         self.data_type = data_type
+        self.fix_date = fix_date
         self.separated_file_for_each_shop = separated_file_for_each_shop
         self.shop_num_column_name = shop_num_column_name
         self.dt_or_dttm_column_name = dt_or_dttm_column_name
         self.dt_or_dttm_format = dt_or_dttm_format
         self.columns = columns
         self.receipt_code_columns = receipt_code_columns
-        self._init_cached_data()
-        super().__init__()
-
-    def _init_cached_data(self):
-        self.cached_data = {}
-
-    def get_shop_id_by_shop_num(self, code):
-        shop_id = np.random.randint(277, 288, size=1)[0]
-        if np.random.random() > 0.5:
-            shop_id = None
-        # shop_id = self.cached_data['generic_shop_ids'].get(code)
-        return shop_id
-
-    def _get_dttm(self, row, dtt):
-        """
-        we must check a type and correct form of our date.
-        If all is good and data_type is equal to 'delivery' then we
-        1. check is this date clear:
-            the difference between dates is less than 7 days
-            (because it's very weird to get the date like that in file
-            with the current date)
-        2. change current date to another: get a date from filename
-        """
-        try:
-            dttm = dt.datetime.strptime(
-                row[self.dt_or_dttm_column_name],
-                self.dt_or_dttm_format,
-            )
-            if self.data_type == "delivery":
-                # https://mindandmachine.myjetbrains.com/youtrack/issue/RND-572
-                # use a date from a filename pattern
-                if abs((dtt - dttm.date()).days) > 7:
-                    raise TypeError("Range between dt and dttm is greater"
-                                    f" than 1 week")
-                else:
-                    dttm = dt.datetime(
-                        dtt.year,
-                        dtt.month,
-                        dtt.day,
-                        dttm.hour,
-                        dttm.minute,
-                        dttm.second
-                    )
-            return dttm, None
-        except TypeError as e:
-            return None, e
-
-    def _get_receipt_code(self, obj):
-        if self.receipt_code_columns:
-            receipt_code = "".join(obj[self.receipt_code_columns].values)
-        else:
-            receipt_code = hash(tuple(obj))
-        return receipt_code
-
-    def _create_object(
-            self,
-            row: pd.Series,
-            dtt: dt.date,
-            all_columns: tp.List[str],
-            unused_columns: tp.List[str]) -> tp.Dict[str, tp.Any]:
-        return {
-            "code": row['receipt_code'],
-            "dttm": row["updated_dttm"],
-            "shop_id": row["shop_id"],
-            "dt": dtt,
-            "data_type": self.data_type,
-            "info": row[list(set(all_columns) - set(unused_columns))].to_json(),
-        }
-
-    def _chunk_transform(
-            self,
-            df: pd.DataFrame,
-            shops_id: set,
-            objects: list,
-            load_errors: set,
-            dtt: dt.date,
-            metainfo: tp.Dict[str, tp.Any]):
-        # Hash generation is different in each python
-        # launch! Can only compare in receipts imported
-        # from the same task
-
-        df["receipt_code"] = df.apply(self._get_receipt_code, axis=1)
-        df["index"] = df.index.values
-        df['shop_id'] = (df[self.shop_num_column_name]
-                            .apply(self.get_shop_id_by_shop_num))
-        df["updated_dttm"] = (
-            df.apply(lambda obj: self._get_dttm(obj, dtt)[0], axis=1))
-        df["dttm_error"] = (
-            df.apply(lambda obj: self._get_dttm(obj, dtt)[1], axis=1))
-
-        # update containers with main info
-
-        shops_id |= set(df.loc[~df['shop_id'].isna(), "shop_id"])
-
-        df_for_objects = df[(~df["shop_id"].isna()) & (~df["updated_dttm"].isna())]
-        if df_for_objects.shape[0]:
-            objects += (df_for_objects.apply(
-                lambda row: self._create_object(row, dtt, df.columns, metainfo['unused_cols']),
-                axis=1).values.tolist())
-
-        # update sets with errors
-        df_shop_load_error = df.loc[df["shop_id"].isna(), self.shop_num_column_name]
-        if df_shop_load_error.shape[0]:
-            load_errors |= set(
-                df_shop_load_error.apply(
-                    lambda x: f"can't map shop_id for shop_num='{x}'"))
-
-        df_dttm_error = df.loc[df["updated_dttm"].isna(), ["dttm_error", "index"]]
-        if df_dttm_error.shape[0]:
-            load_errors |= set(
-                df_dttm_error
-                .apply(
-                    lambda row: f"{row['dttm_error'].__class__.__name__}: "
-                                f"{str(row['dttm_error'])}: {metainfo['filename']}: "
-                                f"row: {row['index']}",
-                    axis=1))
-
-        artefacts = (shops_id, objects, load_errors)
-
-        return artefacts
 
     def transform(
-            self,
-            reader_generator: tp.Iterator,
-            dtt: dt.date,
-            filename: str) -> tp.Set[str]:
+            self, df, dtt: dt.date, filename: str, 
+            cached_data: tp.Dict[str, int]) -> tp.Set[str]:
 
-        load_errors = set()
-        shops_id = set()
-        objects = []
+        self.cached_data = cached_data
 
         unused_cols = ["index", "shop_id", "updated_dttm", "dttm_error"]
-        metainfo = {"unused_cols": unused_cols, "filename": filename}
 
-        try:
-            for ix, df in enumerate(reader_generator):
-                logging.error(df.head())
-                shops_id, objects, load_errors = self._chunk_transform(
-                    df, shops_id, objects, load_errors, dtt, metainfo)
+        def _get_dttm(dtt, dt_or_dttm_format, fix_date):
+            def wrapper(x):
+                try:
+                    dttm = dt.datetime.strptime(x, dt_or_dttm_format,)
+                    if fix_date:
+                        # https://mindandmachine.myjetbrains.com/youtrack/issue/RND-572
+                        # use a date from a filename pattern
+                        if abs((dtt - dttm.date()).days) > 7:
+                            raise TypeError(f"Range between {dtt} and {dttm} is greater"
+                                            f" than 1 week")
+                        else:
+                            dttm = dt.datetime(
+                                dtt.year, dtt.month, dtt.day, min(dttm.hour, 20),
+                                dttm.minute, dttm.second)
+                    return dttm, None, None
+                except Exception as e:
+                    return None, e.__class__.__name__, str(e)
+            return wrapper
 
-        except (FileNotFoundError, PermissionError) as e:
-            load_errors.add(f'{e.__class__.__name__}: {str(e)}: {filename}')
-        return objects, load_errors
+        dt_or_dttm_format = copy.deepcopy(self.dt_or_dttm_format)
+        fix_date = copy.deepcopy(self.fix_date)
+
+        if self.receipt_code_columns:
+            receipt_code_getter = F.concat_ws("", *self.receipt_code_columns)
+        else:
+            receipt_code_getter = F.hash(*df.columns)
+
+        udf_get_dttm = F.udf(
+            lambda x: _get_dttm(dtt, dt_or_dttm_format, fix_date)(x)[0], 
+            returnType=T.TimestampType())
+        udf_get_dttm_error_class = F.udf(
+            lambda x: _get_dttm(dtt, dt_or_dttm_format, fix_date)(x)[1], 
+            returnType=T.StringType())
+        udf_get_dttm_error_value = F.udf(
+            lambda x: _get_dttm(dtt, dt_or_dttm_format, fix_date)(x)[2], 
+            returnType=T.StringType())
+        udf_shop_num_error = F.udf(
+            lambda x: f"can't map shop_id for shop_num='{x}'", 
+            returnType=T.StringType())
+        udf_dttm_error = F.udf(
+            lambda dttm_error_class, dttm_error_value, index: f"{dttm_error_class}: "
+                        f"{dttm_error_value}: {filename}: "
+                        f"row: {index}", returnType=T.StringType())
+
+        df = (
+            df
+            .withColumn("receipt_code", receipt_code_getter)
+            .withColumn("index", F.row_number().over(Window.orderBy(df.columns[0])))
+            .withColumn("code", F.col(self.shop_num_column_name))
+            .join(
+                self.cached_data.withColumnRenamed("object_id", "shop_id"),  # get shop_id
+                on=["code"], how="left"
+            )
+            .withColumn("updated_dttm", udf_get_dttm(self.dt_or_dttm_column_name))
+            .withColumn(
+                "dttm_error_class", 
+                udf_get_dttm_error_class(self.dt_or_dttm_column_name))
+            .withColumn(
+                "dttm_error_value", 
+                udf_get_dttm_error_value(self.dt_or_dttm_column_name))
+            .drop("code")
+        )
+
+        shops_id = df.filter(~F.col("shop_id").isNull()).select("shop_id")
+        valid_df = (
+            df
+            .filter((~F.col("shop_id").isNull()) & (~F.col("updated_dttm").isNull()))
+            .withColumn(
+                "info", 
+                F.to_json(F.struct(*list(set(df.columns) - set(unused_cols)))))
+            .withColumnRenamed("receipt_code", "code")
+            .withColumn("dttm", F.col("updated_dttm"))
+            .withColumn("dt", F.lit(dtt))
+            .withColumn("data_type", F.lit(self.data_type))
+            .withColumn("dttm_added", F.lit(dt.datetime.now()))
+            .withColumn("dttm_modified", F.lit(dt.datetime.now()))
+            .withColumn("version", F.lit(0))
+            .select("code", "dttm", "dttm_added", "dttm_modified", "version",  "shop_id", "dt", "data_type", "info")
+        )
+
+        errors_df = (
+            df
+            .filter(F.col("shop_id").isNull()).select(self.shop_num_column_name)
+            .withColumn("Error", udf_shop_num_error(self.shop_num_column_name))
+            .select("Error")
+            .unionByName(
+                df
+                .filter(F.col("updated_dttm").isNull())
+                .withColumn(
+                    "Error", 
+                    udf_dttm_error("dttm_error_class", "dttm_error_value", "index"))
+                .select("Error")
+            )
+        )
+
+        return shops_id, valid_df, errors_df
+
